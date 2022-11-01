@@ -14,6 +14,7 @@ defmodule SocketDranoTest do
             {:name, SocketDrano},
             {:drain_check_interval, 1000},
             {:shutdown_delay, 5000},
+            {:resume_after_drain, false},
             {:refs, [MyApp.Endpoint.HTTP]}
           ]
         ]
@@ -33,6 +34,7 @@ defmodule SocketDranoTest do
         [
           [
             {:name, SocketDrano},
+            {:resume_after_drain, false},
             {:strategy, {:percentage, 5, 100}},
             {:drain_check_interval, 500},
             {:shutdown_delay, 10_000},
@@ -103,6 +105,56 @@ defmodule SocketDranoTest do
     end
   end
 
+  test "sockets stop draining if resume_after_drain is set to true" do
+    Application.ensure_started(:telemetry)
+
+    :telemetry.attach(
+      "monitor_start",
+      [:socket_drano, :monitor, :start],
+      &__MODULE__.handle_event/4,
+      %{pid: self()}
+    )
+
+    :telemetry.attach(
+      "monitor_stop",
+      [:socket_drano, :monitor, :stop],
+      &__MODULE__.handle_event/4,
+      %{pid: self()}
+    )
+
+    assert SocketDrano.socket_count() == :undefined
+
+    spec = SocketDrano.child_spec(refs: [], shutdown_delay: 10_000, resume_after_drain: true)
+    start_supervised!(spec)
+    disconnects_pid = spawn_link(fn -> disconnects([]) end)
+
+    refute SocketDrano.draining?()
+
+    sockets =
+      Enum.map(1..1000, fn id ->
+        spawn_link(fn -> start_socket_process(id, disconnects_pid) end)
+        id
+      end)
+
+    assert eventually(fn -> SocketDrano.socket_count() == 1000 end)
+
+    SocketDrano.start_draining()
+
+    Process.sleep(500)
+
+    send(disconnects_pid, {:get_ids, self()})
+
+    receive do
+      {:disconnected_ids, ids} ->
+        assert Enum.sort(ids) == Enum.sort(sockets)
+    after
+      10000 ->
+        flunk()
+    end
+
+    assert eventually(fn -> false == SocketDrano.draining?() end)
+  end
+
   def start_socket_process(id, monitor_pid) do
     :telemetry.execute([:phoenix, :channel_joined], %{}, %{
       socket: %{transport: :websocket, transport_pid: self(), endpoint: __MODULE__}
@@ -126,5 +178,21 @@ defmodule SocketDranoTest do
 
   def handle_event(event, measurements, meta, config) do
     send(config.pid, {:event, event, measurements, meta, config})
+  end
+
+  defp eventually(fun, tries \\ 100, interval \\ 20) do
+    case fun.() do
+      x when is_nil(x) or false == x ->
+        Process.sleep(interval)
+
+        if tries == 0 do
+          raise "function returned #{inspect(x)}"
+        else
+          eventually(fun, tries - 1, interval)
+        end
+
+      other ->
+        other
+    end
   end
 end

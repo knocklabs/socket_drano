@@ -52,6 +52,12 @@ defmodule SocketDrano do
     * `:drain_check_interval` - How frequently ranch should check for
       all connections to have drained.
 
+    * `:resume_after_drain` - Should we resume listeners after all connections have been
+      drained?. This option is useful to stop and drain connections on a node to balance
+      its current load and after that accept more connections to keep working.
+      Defaults to `false`.
+
+
     * `:strategy` - Strategy to drain the sockets. The percentage
       and time should resolve to 100% of connections being drained
       in a time less than the shutdown time.
@@ -150,7 +156,8 @@ defmodule SocketDrano do
      %{
        strategy: opts[:strategy],
        refs: opts[:refs],
-       drain_check_interval: opts[:drain_check_interval]
+       drain_check_interval: opts[:drain_check_interval],
+       resume_after_drain: opts[:resume_after_drain]
      }}
   end
 
@@ -180,6 +187,11 @@ defmodule SocketDrano do
 
     drain_sockets(state.strategy, socket_count())
     drain(state.refs, state.drain_check_interval)
+
+    if state.resume_after_drain do
+      :persistent_term.put({:socket_drano, :draining}, false)
+      resume_listeners(state.refs)
+    end
 
     {:noreply, state}
   end
@@ -282,6 +294,19 @@ defmodule SocketDrano do
     |> Enum.each(&wait_for_connections(&1, drain_check_interval))
   end
 
+  defp resume_listeners(:all) do
+    :ranch.info()
+    |> Enum.map(&elem(&1, 0))
+    |> resume_listeners()
+  end
+
+  defp resume_listeners(refs) do
+    Enum.each(refs, fn ref ->
+      Logger.info("Resuming ranch listener #{inspect(ref)}")
+      :ranch.resume_listener(ref)
+    end)
+  end
+
   defp suspend_listener(ref) do
     Logger.info("Suspending ranch listener #{inspect(ref)}")
 
@@ -334,7 +359,8 @@ defmodule SocketDrano do
       strategy: {:percentage, 25, 100},
       name: __MODULE__,
       drain_check_interval: 1000,
-      shutdown_delay: 5000
+      shutdown_delay: 5000,
+      resume_after_drain: false
     ]
   end
 end
