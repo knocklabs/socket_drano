@@ -181,11 +181,12 @@ defmodule SocketDrano do
   end
 
   def handle_cast(:start_draining, state) do
-    Logger.info("Starting to drain #{socket_count()} sockets")
+    count = socket_count()
+    Logger.info("Starting to drain #{count} sockets")
 
     :persistent_term.put({:socket_drano, :draining}, true)
 
-    drain_sockets(state.strategy, socket_count())
+    drain_sockets(state.strategy, count)
     drain(state.refs, state.drain_check_interval)
 
     if state.resume_after_drain do
