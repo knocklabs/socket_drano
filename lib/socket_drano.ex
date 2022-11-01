@@ -102,6 +102,8 @@ defmodule SocketDrano do
   use GenServer
   require Logger
 
+  @table __MODULE__
+
   def child_spec(opts \\ []) do
     opts = ensure_opts(opts)
     :ok = validate_opts!(opts)
@@ -134,12 +136,18 @@ defmodule SocketDrano do
       callback: {__MODULE__, :start_draining, []}
     )
 
+    :ets.new(@table, [
+      :ordered_set,
+      :named_table,
+      :public,
+      write_concurrency: true,
+      read_concurrency: true
+    ])
+
     Process.flag(:trap_exit, true)
 
     {:ok,
      %{
-       sockets: %{},
-       socket_count: 0,
        strategy: opts[:strategy],
        refs: opts[:refs],
        drain_check_interval: opts[:drain_check_interval]
@@ -149,13 +157,8 @@ defmodule SocketDrano do
   def monitor(socket) do
     pid = socket.transport_pid
     endpoint = socket.endpoint
-    GenServer.cast(__MODULE__, {:monitor, pid, endpoint})
-  end
 
-  def handle_cast({:monitor, pid, endpoint}, state) do
-    if Map.has_key?(state.sockets, pid) do
-      {:noreply, state}
-    else
+    if :ets.lookup(@table, pid) == [] do
       Process.monitor(pid)
 
       :telemetry.execute(
@@ -164,17 +167,18 @@ defmodule SocketDrano do
         %{endpoint: endpoint, pid: pid}
       )
 
-      next_state = put_socket(pid, endpoint, state)
-      {:noreply, next_state}
+      :ets.insert(@table, {pid, {endpoint, System.monotonic_time()}})
     end
+
+    :ok
   end
 
   def handle_cast(:start_draining, state) do
-    Logger.info("Starting to drain #{state.socket_count} sockets")
+    Logger.info("Starting to drain #{socket_count()} sockets")
 
     :persistent_term.put({:socket_drano, :draining}, true)
 
-    drain_sockets(state.strategy, state.sockets, state.socket_count)
+    drain_sockets(state.strategy, socket_count())
     drain(state.refs, state.drain_check_interval)
 
     {:noreply, state}
@@ -187,27 +191,25 @@ defmodule SocketDrano do
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     Process.demonitor(ref)
 
-    case Map.pop(state.sockets, pid) do
-      {nil, _sockets} ->
-        {:noreply, state}
+    case :ets.lookup(@table, pid) do
+      [] ->
+        :ok
 
-      {{endpoint, start}, sockets} ->
+      [{pid, {endpoint, start}}] ->
         :telemetry.execute(
           [:socket_drano, :monitor, :stop],
           %{duration: System.monotonic_time() - start},
           %{endpoint: endpoint}
         )
 
-        {:noreply, %{state | sockets: sockets, socket_count: state.socket_count - 1}}
+        :ets.delete(@table, pid)
     end
+
+    {:noreply, state}
   end
 
   def handle_info({:EXIT, _pid, reason}, state) do
     {:stop, reason, state}
-  end
-
-  def handle_call(:socket_count, _from, state) do
-    {:reply, state.socket_count, state}
   end
 
   def start_draining() do
@@ -219,11 +221,7 @@ defmodule SocketDrano do
   end
 
   def socket_count do
-    if GenServer.whereis(__MODULE__) do
-      GenServer.call(__MODULE__, :socket_count)
-    else
-      :not_running
-    end
+    :ets.info(@table, :size)
   end
 
   def handle_event(
@@ -237,11 +235,10 @@ defmodule SocketDrano do
 
   def handle_event([:phoenix, :channel_joined], _measurements, _meta, _), do: :ok
 
-  defp drain_sockets(_strategy, sockets, _count) when sockets === %{}, do: :ok
-
-  defp drain_sockets({:percentage, amount, time}, sockets, count) do
+  defp drain_sockets({:percentage, amount, time}, count) do
     batch_sizes = ceil(count * amount / 100)
 
+    sockets = :ets.tab2list(@table)
     Logger.info("Draining #{count} sockets in batches of #{batch_sizes} every #{time}ms")
 
     Enum.chunk_every(sockets, batch_sizes)
@@ -298,14 +295,6 @@ defmodule SocketDrano do
   defp jitter do
     1..10
     |> Enum.random()
-  end
-
-  defp put_socket(pid, endpoint, state) do
-    %{
-      state
-      | sockets: Map.put(state.sockets, pid, {endpoint, System.monotonic_time()}),
-        socket_count: state.socket_count + 1
-    }
   end
 
   defp validate_opts!(opts) do
