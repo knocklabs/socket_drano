@@ -259,6 +259,8 @@ defmodule SocketDrano do
 
   def handle_event([:phoenix, :channel_joined], _measurements, _meta, _), do: :ok
 
+  defp drain_sockets(_, 0), do: :ok
+
   defp drain_sockets({:percentage, amount, time}, count) do
     batch_sizes = ceil(count * amount / 100)
 
