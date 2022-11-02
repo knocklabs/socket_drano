@@ -183,6 +183,12 @@ defmodule SocketDrano do
   def handle_cast(:start_draining, state) do
     count = socket_count()
     Logger.info("Starting to drain #{count} sockets")
+    start = System.monotonic_time()
+
+    :telemetry.execute(
+      [:socket_drano, :draining, :start],
+      %{start_time: System.system_time()}
+    )
 
     :persistent_term.put({:socket_drano, :draining}, true)
 
@@ -193,6 +199,11 @@ defmodule SocketDrano do
       :persistent_term.put({:socket_drano, :draining}, false)
       resume_listeners(state.refs)
     end
+
+    :telemetry.execute(
+      [:socket_drano, :draining, :stop],
+      %{duration: System.monotonic_time() - start}
+    )
 
     {:noreply, state}
   end
