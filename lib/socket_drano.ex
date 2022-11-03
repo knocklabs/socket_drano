@@ -166,8 +166,6 @@ defmodule SocketDrano do
     endpoint = socket.endpoint
 
     if :ets.lookup(@table, pid) == [] do
-      Process.monitor(pid)
-
       :telemetry.execute(
         [:socket_drano, :monitor, :start],
         %{start_time: System.system_time()},
@@ -175,9 +173,15 @@ defmodule SocketDrano do
       )
 
       :ets.insert(@table, {pid, {endpoint, System.monotonic_time()}})
+      GenServer.cast(__MODULE__, {:monitor, pid})
     end
 
     :ok
+  end
+
+  def handle_cast({:monitor, pid}, state) do
+    Process.monitor(pid)
+    {:noreply, state}
   end
 
   def handle_cast(:start_draining, state) do

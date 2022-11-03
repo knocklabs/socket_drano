@@ -105,6 +105,45 @@ defmodule SocketDranoTest do
     end
   end
 
+  test "sockets are monitored and deleted from ets on terminate" do
+    Application.ensure_started(:telemetry)
+    test_pid = self()
+    spec = SocketDrano.child_spec(refs: [], shutdown_delay: 10_000)
+    start_supervised!(spec)
+
+    socket_pid =
+      spawn(fn ->
+        receive do
+          %Phoenix.Socket.Broadcast{event: "disconnect"} ->
+            send(test_pid, :disconnected)
+        end
+      end)
+
+    assert SocketDrano.socket_count() == 0
+
+    SocketDrano.handle_event(
+      [:phoenix, :channel_joined],
+      %{},
+      %{socket: %{transport: :websocket, transport_pid: socket_pid, endpoint: nil}},
+      %{}
+    )
+
+    assert SocketDrano.socket_count() == 1
+
+    SocketDrano.handle_event(
+      [:phoenix, :channel_joined],
+      %{},
+      %{socket: %{transport: :websocket, transport_pid: socket_pid, endpoint: nil}},
+      %{}
+    )
+
+    assert SocketDrano.socket_count() == 1
+    SocketDrano.start_draining()
+    assert_receive :disconnected, 1000
+    refute Process.alive?(socket_pid)
+    assert eventually(fn -> SocketDrano.socket_count() == 0 end, 1000)
+  end
+
   test "sockets stop draining if resume_after_drain is set to true" do
     Application.ensure_started(:telemetry)
 
