@@ -284,6 +284,27 @@ defmodule SocketDrano do
     end)
   end
 
+  # drain only `percentage` of the sockets from the socket, and drain them by
+  # percentage `batch_size` every `time`ms
+  defp drain_sockets({:drain_only, percentage, batch_size_percent, time}, count) do
+    socket_drain_size = ceil(count * percentage / 100)
+    socket_drain_batch_size = ceil(socket_drain_size * batch_size_percent / 100)
+
+    sockets = :ets.tab2list(@table)
+
+    Logger.info(
+      "Draining #{percentage}% of sockets total:#{socket_drain_size} in batches of #{socket_drain_batch_size} every #{time}ms"
+    )
+
+    sockets
+    |> Enum.take(socket_drain_size)
+    |> Enum.chunk_every(socket_drain_batch_size)
+    |> Enum.with_index()
+    |> Enum.each(fn {batch, idx} ->
+      spawn(fn -> drain_socket_batch(batch, idx, idx * time) end)
+    end)
+  end
+
   defp drain_socket_batch(batch, batch_id, delay) do
     Process.sleep(delay)
 
@@ -356,6 +377,16 @@ defmodule SocketDrano do
        when is_integer(percent) and
               percent > 0 and
               percent <= 100 and
+              is_integer(time) and
+              time > 0,
+       do: :ok
+
+  defp validate_strategy!({:drain_only, percent, batch_size_percent, time})
+       when is_integer(percent) and
+              percent > 0 and
+              percent <= 100 and
+              batch_size_percent > 0 and
+              batch_size_percent <= 100 and
               is_integer(time) and
               time > 0,
        do: :ok

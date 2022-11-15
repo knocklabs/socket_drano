@@ -105,6 +105,55 @@ defmodule SocketDranoTest do
     end
   end
 
+  test "socket monitoring and draining with drain_only strategy" do
+    Application.ensure_started(:telemetry)
+
+    :telemetry.attach(
+      "monitor_start",
+      [:socket_drano, :monitor, :start],
+      &__MODULE__.handle_event/4,
+      %{pid: self()}
+    )
+
+    :telemetry.attach(
+      "monitor_stop",
+      [:socket_drano, :monitor, :stop],
+      &__MODULE__.handle_event/4,
+      %{pid: self()}
+    )
+
+    assert SocketDrano.socket_count() == :undefined
+
+    spec =
+      SocketDrano.child_spec(
+        refs: [],
+        shutdown_delay: 10_000,
+        strategy: {:drain_only, 25, 25, 100}
+      )
+
+    start_supervised!(spec)
+    disconnects_pid = spawn_link(fn -> disconnects([]) end)
+
+    refute SocketDrano.draining?()
+
+    Enum.each(1..100, fn id ->
+      spawn_link(fn -> start_socket_process(id, disconnects_pid) end)
+    end)
+
+    assert eventually(fn -> SocketDrano.socket_count() == 100 end, 1000)
+    SocketDrano.start_draining()
+    assert eventually(fn -> SocketDrano.socket_count() == 75 end)
+    send(disconnects_pid, {:get_ids, self()})
+
+    receive do
+      {:disconnected_ids, ids} ->
+        assert length(ids) == 25
+    after
+      10000 ->
+        flunk()
+    end
+  end
+
   test "sockets are monitored and deleted from ets on terminate" do
     Application.ensure_started(:telemetry)
     test_pid = self()
