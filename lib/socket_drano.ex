@@ -206,9 +206,10 @@ defmodule SocketDrano do
     drain(state.refs, state.drain_check_interval)
 
     if state.resume_after_drain do
-      :persistent_term.put({:socket_drano, :draining}, false)
       resume_listeners(state.refs)
     end
+
+    :persistent_term.put({:socket_drano, :draining}, false)
 
     :telemetry.execute(
       [:socket_drano, :draining, :stop],
