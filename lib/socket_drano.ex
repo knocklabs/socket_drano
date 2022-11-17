@@ -383,6 +383,7 @@ defmodule SocketDrano do
 
   defp validate_strategy!({:drain_only, percent, batch_size_percent, time})
        when is_integer(percent) and
+              is_integer(batch_size_percent) and
               percent > 0 and
               percent <= 100 and
               batch_size_percent > 0 and
