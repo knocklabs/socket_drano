@@ -84,16 +84,10 @@ defmodule SocketDranoTest do
         id
       end)
 
-    Process.sleep(100)
-
-    assert SocketDrano.socket_count() == 1000
-
+    assert eventually(fn -> SocketDrano.socket_count() == 1000 end, 1000)
     SocketDrano.start_draining()
-
-    Process.sleep(500)
-
-    assert SocketDrano.draining?()
-
+    assert eventually(fn -> SocketDrano.draining?() == false end, 1000)
+    assert eventually(fn -> SocketDrano.socket_count() == 0 end, 1000)
     send(disconnects_pid, {:get_ids, self()})
 
     receive do

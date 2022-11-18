@@ -202,8 +202,9 @@ defmodule SocketDrano do
 
     :persistent_term.put({:socket_drano, :draining}, true)
 
-    drain_sockets(state.strategy, count)
     drain(state.refs, state.drain_check_interval)
+    # sync wait on sockets to drain so we don't let other drains to happen at the same time
+    drain_sockets(state.strategy, count)
 
     if state.resume_after_drain do
       resume_listeners(state.refs)
@@ -278,11 +279,10 @@ defmodule SocketDrano do
     sockets = :ets.tab2list(@table)
     Logger.info("Draining #{count} sockets in batches of #{batch_sizes} every #{time}ms")
 
-    Enum.chunk_every(sockets, batch_sizes)
-    |> Enum.with_index()
-    |> Enum.each(fn {batch, idx} ->
-      spawn(fn -> drain_socket_batch(batch, idx, idx * time) end)
-    end)
+    sockets
+    |> Enum.chunk_every(batch_sizes)
+    |> drain_socket_batch()
+    |> Stream.run()
   end
 
   # drain only `percentage` of the sockets from the socket, and drain them by
@@ -300,31 +300,37 @@ defmodule SocketDrano do
     sockets
     |> Enum.take(socket_drain_size)
     |> Enum.chunk_every(socket_drain_batch_size)
-    |> Enum.with_index()
-    |> Enum.each(fn {batch, idx} ->
-      spawn(fn -> drain_socket_batch(batch, idx, idx * time) end)
-    end)
+    |> drain_socket_batch()
+    |> Stream.run()
   end
 
-  defp drain_socket_batch(batch, batch_id, delay) do
-    Process.sleep(delay)
-
-    Logger.info("Draining socket batch #{batch_id} after #{delay}ms batch_size:=#{length(batch)}")
-
-    Enum.each(batch, fn socket ->
-      spawn(fn -> drain_socket(socket) end)
-    end)
+  defp drain_socket_batch(socket_batches) do
+    Task.async_stream(
+      socket_batches,
+      fn sockets ->
+        sockets |> drain_sockets() |> Stream.run()
+      end,
+      ordered: false,
+      timeout: :infinity,
+      max_concurrency: System.schedulers_online() * 4
+    )
   end
 
-  defp drain_socket({pid, {endpoint, start}}) do
-    Process.sleep(jitter())
+  defp drain_sockets(sockets) do
+    Task.async_stream(
+      sockets,
+      fn {pid, {endpoint, start}} ->
+        send(pid, %Phoenix.Socket.Broadcast{event: "disconnect"})
 
-    send(pid, %Phoenix.Socket.Broadcast{event: "disconnect"})
-
-    :telemetry.execute(
-      [:socket_drano, :monitor, :stop],
-      %{duration: System.monotonic_time() - start},
-      %{endpoint: endpoint, pid: pid}
+        :telemetry.execute(
+          [:socket_drano, :monitor, :stop],
+          %{duration: System.monotonic_time() - start},
+          %{endpoint: endpoint, pid: pid}
+        )
+      end,
+      ordered: false,
+      timeout: :infinity,
+      max_concurrency: System.schedulers_online()
     )
   end
 
@@ -361,11 +367,6 @@ defmodule SocketDrano do
 
   defp wait_for_connections(ref, drain_check_interval) do
     :ranch.wait_for_connections(ref, :==, 0, drain_check_interval)
-  end
-
-  defp jitter do
-    1..10
-    |> Enum.random()
   end
 
   defp validate_opts!(opts) do
