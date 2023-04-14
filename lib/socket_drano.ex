@@ -163,7 +163,8 @@ defmodule SocketDrano do
        strategy: opts[:strategy],
        refs: opts[:refs],
        drain_check_interval: opts[:drain_check_interval],
-       resume_after_drain: opts[:resume_after_drain]
+       resume_after_drain: opts[:resume_after_drain],
+       opts: opts
      }}
   end
 
@@ -190,7 +191,7 @@ defmodule SocketDrano do
     {:noreply, state}
   end
 
-  def handle_cast(:start_draining, state) do
+  def handle_cast(:start_draining, %{opts: opts} = state) do
     count = socket_count()
     Logger.info("Starting to drain #{count} sockets")
     start = System.monotonic_time()
@@ -204,7 +205,7 @@ defmodule SocketDrano do
 
     drain(state.refs, state.drain_check_interval)
     # sync wait on sockets to drain so we don't let other drains to happen at the same time
-    drain_sockets(state.strategy, count)
+    drain_sockets(state.strategy, count, opts)
 
     if state.resume_after_drain do
       resume_listeners(state.refs)
@@ -271,9 +272,9 @@ defmodule SocketDrano do
 
   def handle_event([:phoenix, :channel_joined], _measurements, _meta, _), do: :ok
 
-  defp drain_sockets(_, 0), do: :ok
+  defp drain_sockets(_, 0, _), do: :ok
 
-  defp drain_sockets({:percentage, amount, time}, count) do
+  defp drain_sockets({:percentage, amount, time}, count, opts) do
     batch_sizes = ceil(count * amount / 100)
 
     sockets = :ets.tab2list(@table)
@@ -281,13 +282,13 @@ defmodule SocketDrano do
 
     sockets
     |> Enum.chunk_every(batch_sizes)
-    |> drain_socket_batch()
+    |> drain_socket_batch(opts)
     |> Stream.run()
   end
 
   # drain only `percentage` of the sockets from the socket, and drain them by
   # percentage `batch_size` every `time`ms
-  defp drain_sockets({:drain_only, percentage, batch_size_percent, time}, count) do
+  defp drain_sockets({:drain_only, percentage, batch_size_percent, time}, count, opts) do
     socket_drain_size = ceil(count * percentage / 100)
     socket_drain_batch_size = ceil(socket_drain_size * batch_size_percent / 100)
 
@@ -300,23 +301,23 @@ defmodule SocketDrano do
     sockets
     |> Enum.take(socket_drain_size)
     |> Enum.chunk_every(socket_drain_batch_size)
-    |> drain_socket_batch()
+    |> drain_socket_batch(opts)
     |> Stream.run()
   end
 
-  defp drain_socket_batch(socket_batches) do
+  defp drain_socket_batch(socket_batches, opts) do
     Task.async_stream(
       socket_batches,
       fn sockets ->
-        sockets |> drain_sockets() |> Stream.run()
+        sockets |> drain_sockets(opts) |> Stream.run()
       end,
       ordered: false,
       timeout: :infinity,
-      max_concurrency: System.schedulers_online() * 4
+      max_concurrency: opts.close_batch_concurrency
     )
   end
 
-  defp drain_sockets(sockets) do
+  defp drain_sockets(sockets, opts) do
     Task.async_stream(
       sockets,
       fn {pid, {endpoint, start}} ->
@@ -330,7 +331,7 @@ defmodule SocketDrano do
       end,
       ordered: false,
       timeout: :infinity,
-      max_concurrency: System.schedulers_online()
+      max_concurrency: opts.close_socket_concurrency
     )
   end
 
@@ -418,7 +419,9 @@ defmodule SocketDrano do
       name: __MODULE__,
       drain_check_interval: 1000,
       shutdown_delay: 5000,
-      resume_after_drain: false
+      resume_after_drain: false,
+      close_batch_concurrency: System.schedulers_online() * 4,
+      close_socket_concurrency: System.schedulers_online()
     ]
   end
 end
