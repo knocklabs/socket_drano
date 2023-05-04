@@ -313,7 +313,7 @@ defmodule SocketDrano do
       end,
       ordered: false,
       timeout: :infinity,
-      max_concurrency: opts.close_batch_concurrency
+      max_concurrency: Keyword.fetch!(opts, :close_batch_concurrency)
     )
   end
 
@@ -331,7 +331,7 @@ defmodule SocketDrano do
       end,
       ordered: false,
       timeout: :infinity,
-      max_concurrency: opts.close_socket_concurrency
+      max_concurrency: Keyword.fetch!(opts, :close_socket_concurrency)
     )
   end
 
